@@ -31,15 +31,18 @@ Preferences prefs;
 // =========================
 unsigned long tiempoCebado = 3000;
 unsigned long tiempoReintento = 5000;
-float flujoMin = 5.0;
 
-// Histéresis
+// Histéresis nivel
 int nivelArranque = 85;
 int nivelParo = 95;
 
-// Nuevos intervalos de publicación de flujo
-unsigned long intervaloFlujoCebado = 1000;   // ms
-unsigned long intervaloFlujoActivo = 2000;   // ms
+// Histéresis flujo
+float flujoOn = 5.5;   // Confirmar flujo válido
+float flujoOff = 4.0;  // Confirmar pérdida de flujo
+
+// Publicación de flujo
+unsigned long intervaloFlujoCebado = 1000;
+unsigned long intervaloFlujoActivo = 2000;
 
 // =========================
 // VARIABLES DE TRABAJO
@@ -58,6 +61,10 @@ bool estadoBombaPrevio = false;
 bool modoManual = false;
 bool flujoCeroPublicado = false;
 
+// Estado lógico de flujo con histéresis
+bool flujoValido = false;
+
+// Máquina de estados
 enum Estado {
   APAGADO,
   ESPERANDO_FLUJO,
@@ -77,6 +84,7 @@ void guardarConfiguracion();
 void aplicarConfigPorTopico(const String& topicStr, const String& mensaje);
 void publicarFlujo();
 void publicarFlujoCero();
+void actualizarEstadoFlujoValido();
 
 // =========================
 // INTERRUPCIÓN
@@ -93,17 +101,27 @@ void cargarConfiguracion() {
 
   tiempoCebado = prefs.getULong("cebado", 3000);
   tiempoReintento = prefs.getULong("reint", 5000);
-  flujoMin = prefs.getFloat("flujomin", 5.0);
+
   nivelArranque = prefs.getInt("nivarr", 85);
   nivelParo = prefs.getInt("nivparo", 95);
+
+  flujoOn = prefs.getFloat("flon", 5.5);
+  flujoOff = prefs.getFloat("floff", 4.0);
+
   intervaloFlujoCebado = prefs.getULong("ifceba", 1000);
   intervaloFlujoActivo = prefs.getULong("ifact", 2000);
 
   prefs.end();
 
+  // Protección básica
   if (nivelArranque >= nivelParo) {
     nivelArranque = 85;
     nivelParo = 95;
+  }
+
+  if (flujoOff >= flujoOn) {
+    flujoOn = 5.5;
+    flujoOff = 4.0;
   }
 
   Serial.println("Configuración cargada desde NVS:");
@@ -111,12 +129,14 @@ void cargarConfiguracion() {
   Serial.println(tiempoCebado);
   Serial.print("tiempoReintento = ");
   Serial.println(tiempoReintento);
-  Serial.print("flujoMin = ");
-  Serial.println(flujoMin);
   Serial.print("nivelArranque = ");
   Serial.println(nivelArranque);
   Serial.print("nivelParo = ");
   Serial.println(nivelParo);
+  Serial.print("flujoOn = ");
+  Serial.println(flujoOn);
+  Serial.print("flujoOff = ");
+  Serial.println(flujoOff);
   Serial.print("intervaloFlujoCebado = ");
   Serial.println(intervaloFlujoCebado);
   Serial.print("intervaloFlujoActivo = ");
@@ -128,9 +148,13 @@ void guardarConfiguracion() {
 
   prefs.putULong("cebado", tiempoCebado);
   prefs.putULong("reint", tiempoReintento);
-  prefs.putFloat("flujomin", flujoMin);
+
   prefs.putInt("nivarr", nivelArranque);
   prefs.putInt("nivparo", nivelParo);
+
+  prefs.putFloat("flon", flujoOn);
+  prefs.putFloat("floff", flujoOff);
+
   prefs.putULong("ifceba", intervaloFlujoCebado);
   prefs.putULong("ifact", intervaloFlujoActivo);
 
@@ -193,14 +217,17 @@ void publicarConfiguracion() {
   ultoa(tiempoReintento, buffer, 10);
   client.publish("esp32/config/estado/tiempo_reintento", buffer, true);
 
-  dtostrf(flujoMin, 4, 2, buffer);
-  client.publish("esp32/config/estado/flujo_min", buffer, true);
-
   itoa(nivelArranque, buffer, 10);
   client.publish("esp32/config/estado/nivel_arranque", buffer, true);
 
   itoa(nivelParo, buffer, 10);
   client.publish("esp32/config/estado/nivel_paro", buffer, true);
+
+  dtostrf(flujoOn, 4, 2, buffer);
+  client.publish("esp32/config/estado/flujo_on", buffer, true);
+
+  dtostrf(flujoOff, 4, 2, buffer);
+  client.publish("esp32/config/estado/flujo_off", buffer, true);
 
   ultoa(intervaloFlujoCebado, buffer, 10);
   client.publish("esp32/config/estado/intervalo_flujo_cebado", buffer, true);
@@ -209,6 +236,21 @@ void publicarConfiguracion() {
   client.publish("esp32/config/estado/intervalo_flujo_activo", buffer, true);
 
   Serial.println("Configuración publicada");
+}
+
+// =========================
+// HISTÉRESIS FLUJO
+// =========================
+void actualizarEstadoFlujoValido() {
+  if (!flujoValido) {
+    if (flujo >= flujoOn) {
+      flujoValido = true;
+    }
+  } else {
+    if (flujo <= flujoOff) {
+      flujoValido = false;
+    }
+  }
 }
 
 // =========================
@@ -239,17 +281,6 @@ void aplicarConfigPorTopico(const String& topicStr, const String& mensaje) {
       Serial.println("Valor inválido para tiempo_reintento");
     }
   }
-  else if (topicStr == "esp32/config/flujo_min") {
-    float nuevoValor = mensaje.toFloat();
-    if (nuevoValor >= 0.1 && nuevoValor <= 100.0) {
-      flujoMin = nuevoValor;
-      cambio = true;
-      Serial.print("Nuevo flujoMin: ");
-      Serial.println(flujoMin);
-    } else {
-      Serial.println("Valor inválido para flujo_min");
-    }
-  }
   else if (topicStr == "esp32/config/nivel_arranque") {
     int nuevoValor = mensaje.toInt();
     if (nuevoValor >= 1 && nuevoValor <= 99 && nuevoValor < nivelParo) {
@@ -270,6 +301,28 @@ void aplicarConfigPorTopico(const String& topicStr, const String& mensaje) {
       Serial.println(nivelParo);
     } else {
       Serial.println("Valor inválido para nivel_paro");
+    }
+  }
+  else if (topicStr == "esp32/config/flujo_on") {
+    float nuevoValor = mensaje.toFloat();
+    if (nuevoValor >= 0.1 && nuevoValor <= 100.0 && nuevoValor > flujoOff) {
+      flujoOn = nuevoValor;
+      cambio = true;
+      Serial.print("Nuevo flujoOn: ");
+      Serial.println(flujoOn);
+    } else {
+      Serial.println("Valor inválido para flujo_on");
+    }
+  }
+  else if (topicStr == "esp32/config/flujo_off") {
+    float nuevoValor = mensaje.toFloat();
+    if (nuevoValor >= 0.0 && nuevoValor < flujoOn) {
+      flujoOff = nuevoValor;
+      cambio = true;
+      Serial.print("Nuevo flujoOff: ");
+      Serial.println(flujoOff);
+    } else {
+      Serial.println("Valor inválido para flujo_off");
     }
   }
   else if (topicStr == "esp32/config/intervalo_flujo_cebado") {
@@ -335,6 +388,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
       estadoBomba = false;
       estado = APAGADO;
       tiempoEstado = millis();
+      flujoValido = false;
       flujoCeroPublicado = false;
 
       publicarEstadoBomba();
@@ -350,6 +404,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
       estadoBomba = false;
       estado = APAGADO;
       tiempoEstado = millis();
+      flujoValido = false;
       flujoCeroPublicado = false;
 
       publicarEstadoBomba();
@@ -368,9 +423,10 @@ void callback(char* topic, byte* payload, unsigned int length) {
     if (mensajeUpper == "ON") {
       digitalWrite(pinBomba, HIGH);
       estadoBomba = true;
-      estado = ESPERANDO_FLUJO;   // manual también entra a ventana de cebado/publicación rápida
+      estado = ESPERANDO_FLUJO;
       tiempoEstado = millis();
       ultimaPublicacionFlujo = 0;
+      flujoValido = false;
       flujoCeroPublicado = false;
 
       publicarEstadoBomba();
@@ -382,6 +438,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
       estadoBomba = false;
       estado = APAGADO;
       tiempoEstado = millis();
+      flujoValido = false;
 
       publicarEstadoBomba();
       publicarFlujoCero();
@@ -393,9 +450,10 @@ void callback(char* topic, byte* payload, unsigned int length) {
   else if (
     topicStr == "esp32/config/tiempo_cebado" ||
     topicStr == "esp32/config/tiempo_reintento" ||
-    topicStr == "esp32/config/flujo_min" ||
     topicStr == "esp32/config/nivel_arranque" ||
     topicStr == "esp32/config/nivel_paro" ||
+    topicStr == "esp32/config/flujo_on" ||
+    topicStr == "esp32/config/flujo_off" ||
     topicStr == "esp32/config/intervalo_flujo_cebado" ||
     topicStr == "esp32/config/intervalo_flujo_activo"
   ) {
@@ -436,9 +494,10 @@ void reconnect() {
 
       client.subscribe("esp32/config/tiempo_cebado");
       client.subscribe("esp32/config/tiempo_reintento");
-      client.subscribe("esp32/config/flujo_min");
       client.subscribe("esp32/config/nivel_arranque");
       client.subscribe("esp32/config/nivel_paro");
+      client.subscribe("esp32/config/flujo_on");
+      client.subscribe("esp32/config/flujo_off");
       client.subscribe("esp32/config/intervalo_flujo_cebado");
       client.subscribe("esp32/config/intervalo_flujo_activo");
 
@@ -447,15 +506,17 @@ void reconnect() {
       Serial.println("Suscrito a esp32/cmd/bomba");
       Serial.println("Suscrito a esp32/config/tiempo_cebado");
       Serial.println("Suscrito a esp32/config/tiempo_reintento");
-      Serial.println("Suscrito a esp32/config/flujo_min");
       Serial.println("Suscrito a esp32/config/nivel_arranque");
       Serial.println("Suscrito a esp32/config/nivel_paro");
+      Serial.println("Suscrito a esp32/config/flujo_on");
+      Serial.println("Suscrito a esp32/config/flujo_off");
       Serial.println("Suscrito a esp32/config/intervalo_flujo_cebado");
       Serial.println("Suscrito a esp32/config/intervalo_flujo_activo");
 
       publicarEstadoBomba();
       publicarModo();
       publicarConfiguracion();
+
       if (!estadoBomba) {
         publicarFlujoCero();
       }
@@ -521,27 +582,28 @@ void loop() {
 
     flujo = pulsosLocal / 7.5;
 
-    Serial.print("Flujo: ");
+    Serial.print("Flujo medido: ");
     Serial.print(flujo);
     Serial.println(" L/min");
+
+    actualizarEstadoFlujoValido();
+
+    Serial.print("Flujo válido: ");
+    Serial.println(flujoValido ? "SI" : "NO");
 
     ultimoCalculoFlujo = now;
   }
 
   // -------------------------
-  // Si está en modo manual,
-  // NO ejecutar lógica automática
-  // pero sí publicar flujo si bomba está ON
+  // MODO MANUAL
   // -------------------------
   if (modoManual) {
     if (estadoBomba) {
-      unsigned long intervaloActual =
-          (flujo > flujoMin) ? intervaloFlujoActivo : intervaloFlujoCebado;
-
-      if (now - ultimaPublicacionFlujo >= intervaloActual) {
+      if (now - ultimaPublicacionFlujo >= intervaloFlujoCebado) {
         publicarFlujo();
         ultimaPublicacionFlujo = now;
       }
+
       flujoCeroPublicado = false;
     } else {
       if (!flujoCeroPublicado) {
@@ -554,11 +616,12 @@ void loop() {
       publicarEstadoBomba();
       estadoBombaPrevio = estadoBomba;
     }
+
     return;
   }
 
   // -------------------------
-  // Máquina de estados AUTO
+  // MÁQUINA DE ESTADOS AUTO
   // -------------------------
   switch (estado) {
 
@@ -570,21 +633,23 @@ void loop() {
         estado = ESPERANDO_FLUJO;
         tiempoEstado = now;
         ultimaPublicacionFlujo = 0;
+        flujoValido = false;
         flujoCeroPublicado = false;
       }
       break;
 
     case ESPERANDO_FLUJO:
       if (now - tiempoEstado >= tiempoCebado) {
-        if (flujo > flujoMin) {
+        if (flujoValido) {
           estado = ENCENDIDO_OK;
-          Serial.println("Flujo detectado, bomba estable");
+          Serial.println("Flujo confirmado, bomba estable");
         } else {
           digitalWrite(pinBomba, LOW);
           estadoBomba = false;
           estado = APAGADO;
           tiempoEstado = now;
-          Serial.println("Sin flujo, apagando");
+          flujoValido = false;
+          Serial.println("Sin flujo válido, apagando");
         }
       }
       break;
@@ -595,9 +660,10 @@ void loop() {
         estadoBomba = false;
         estado = APAGADO;
         tiempoEstado = now;
+        flujoValido = false;
         Serial.println("Nivel de paro alcanzado, apagando");
       }
-      else if (flujo < flujoMin) {
+      else if (!flujoValido) {
         digitalWrite(pinBomba, LOW);
         estadoBomba = false;
         estado = APAGADO;
@@ -608,18 +674,15 @@ void loop() {
   }
 
   // -------------------------
-  // Publicación de flujo
-  // Solo cuando bomba está activa
+  // PUBLICACIÓN DE FLUJO
   // -------------------------
   if (estadoBomba) {
     unsigned long intervaloActual;
 
     if (estado == ESPERANDO_FLUJO) {
       intervaloActual = intervaloFlujoCebado;
-    } else if (flujo > flujoMin) {
-      intervaloActual = intervaloFlujoActivo;
     } else {
-      intervaloActual = intervaloFlujoCebado;
+      intervaloActual = flujoValido ? intervaloFlujoActivo : intervaloFlujoCebado;
     }
 
     if (now - ultimaPublicacionFlujo >= intervaloActual) {
@@ -636,7 +699,7 @@ void loop() {
   }
 
   // -------------------------
-  // Publicar estado solo si cambió
+  // PUBLICAR ESTADO SOLO SI CAMBIÓ
   // -------------------------
   if (estadoBomba != estadoBombaPrevio) {
     publicarEstadoBomba();
