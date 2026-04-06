@@ -21,6 +21,9 @@ const char* mqtt_pass = mqtt_pass_data;
 const int pinBomba = 2;
 const int pinFlujo = 4;
 
+// Tiempo fijo para revalidar nivel antes de arrancar
+const unsigned long TIEMPO_PRECHECK_NIVEL = 5000;
+
 // MQTT / NVS
 WiFiClientSecure espClient;
 PubSubClient client(espClient);
@@ -33,12 +36,14 @@ unsigned long tiempoCebado = 3000;
 unsigned long tiempoReintento = 5000;
 
 // Histéresis nivel
+// Se conservan para compatibilidad de UI/config,
+// pero la lógica AUTO usa esp32/nivel_bajo
 int nivelArranque = 85;
 int nivelParo = 95;
 
 // Histéresis flujo
-float flujoOn = 5.5;   // Confirmar flujo válido
-float flujoOff = 4.0;  // Confirmar pérdida de flujo
+float flujoOn = 5.5;
+float flujoOff = 4.0;
 
 // Publicación de flujo
 unsigned long intervaloFlujoCebado = 1000;
@@ -64,9 +69,14 @@ bool flujoCeroPublicado = false;
 // Estado lógico de flujo con histéresis
 bool flujoValido = false;
 
+// Estado lógico de nivel recibido desde el ESP ultrasónico
+bool nivelBajo = false;
+bool nivelBajoRecibido = false;
+
 // Máquina de estados
 enum Estado {
   APAGADO,
+  PRE_CHECK_NIVEL,
   ESPERANDO_FLUJO,
   ENCENDIDO_OK
 };
@@ -85,6 +95,7 @@ void aplicarConfigPorTopico(const String& topicStr, const String& mensaje);
 void publicarFlujo();
 void publicarFlujoCero();
 void actualizarEstadoFlujoValido();
+void publicarCmdPrecheckNivel();
 
 // =========================
 // INTERRUPCIÓN
@@ -113,7 +124,6 @@ void cargarConfiguracion() {
 
   prefs.end();
 
-  // Protección básica
   if (nivelArranque >= nivelParo) {
     nivelArranque = 85;
     nivelParo = 95;
@@ -236,6 +246,14 @@ void publicarConfiguracion() {
   client.publish("esp32/config/estado/intervalo_flujo_activo", buffer, true);
 
   Serial.println("Configuración publicada");
+}
+
+void publicarCmdPrecheckNivel() {
+  if (client.publish("esp32/cmd/precheck_nivel", "ON", false)) {
+    Serial.println("Publicado esp32/cmd/precheck_nivel = ON");
+  } else {
+    Serial.println("Error al publicar esp32/cmd/precheck_nivel");
+  }
 }
 
 // =========================
@@ -377,8 +395,21 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
   if (topicStr == "esp32/datos") {
     valor = mensaje.toInt();
-    Serial.print("Nivel actualizado: ");
+    Serial.print("Nivel actualizado (%): ");
     Serial.println(valor);
+  }
+  else if (topicStr == "esp32/nivel_bajo") {
+    if (mensajeUpper == "SI") {
+      nivelBajo = true;
+      nivelBajoRecibido = true;
+      Serial.println("Nivel bajo recibido: SI");
+    } else if (mensajeUpper == "NO") {
+      nivelBajo = false;
+      nivelBajoRecibido = true;
+      Serial.println("Nivel bajo recibido: NO");
+    } else {
+      Serial.println("Valor inválido en esp32/nivel_bajo");
+    }
   }
   else if (topicStr == "esp32/cmd/modo") {
     if (mensajeUpper == "MANUAL") {
@@ -489,6 +520,7 @@ void reconnect() {
       Serial.println(" conectado");
 
       client.subscribe("esp32/datos");
+      client.subscribe("esp32/nivel_bajo");
       client.subscribe("esp32/cmd/modo");
       client.subscribe("esp32/cmd/bomba");
 
@@ -502,6 +534,7 @@ void reconnect() {
       client.subscribe("esp32/config/intervalo_flujo_activo");
 
       Serial.println("Suscrito a esp32/datos");
+      Serial.println("Suscrito a esp32/nivel_bajo");
       Serial.println("Suscrito a esp32/cmd/modo");
       Serial.println("Suscrito a esp32/cmd/bomba");
       Serial.println("Suscrito a esp32/config/tiempo_cebado");
@@ -626,15 +659,34 @@ void loop() {
   switch (estado) {
 
     case APAGADO:
-      if (valor < nivelArranque && (now - tiempoEstado >= tiempoReintento)) {
-        Serial.println("Nivel bajo: intentando encender bomba...");
-        digitalWrite(pinBomba, HIGH);
-        estadoBomba = true;
-        estado = ESPERANDO_FLUJO;
+      if (!nivelBajoRecibido) {
+        break;
+      }
+
+      if (nivelBajo && (now - tiempoEstado >= tiempoReintento)) {
+        Serial.println("Nivel bajo detectado, entrando a pre-check de 5 segundos...");
+        publicarCmdPrecheckNivel();
+        estado = PRE_CHECK_NIVEL;
         tiempoEstado = now;
-        ultimaPublicacionFlujo = 0;
-        flujoValido = false;
-        flujoCeroPublicado = false;
+      }
+      break;
+
+    case PRE_CHECK_NIVEL:
+      if (now - tiempoEstado >= TIEMPO_PRECHECK_NIVEL) {
+        if (nivelBajo) {
+          Serial.println("Nivel sigue bajo tras pre-check, encendiendo bomba...");
+          digitalWrite(pinBomba, HIGH);
+          estadoBomba = true;
+          estado = ESPERANDO_FLUJO;
+          tiempoEstado = now;
+          ultimaPublicacionFlujo = 0;
+          flujoValido = false;
+          flujoCeroPublicado = false;
+        } else {
+          Serial.println("Nivel ya no está bajo tras pre-check, no se enciende bomba");
+          estado = APAGADO;
+          tiempoEstado = now;
+        }
       }
       break;
 
@@ -655,13 +707,13 @@ void loop() {
       break;
 
     case ENCENDIDO_OK:
-      if (valor >= nivelParo) {
+      if (nivelBajoRecibido && !nivelBajo) {
         digitalWrite(pinBomba, LOW);
         estadoBomba = false;
         estado = APAGADO;
         tiempoEstado = now;
         flujoValido = false;
-        Serial.println("Nivel de paro alcanzado, apagando");
+        Serial.println("Nivel ya no está bajo, apagando");
       }
       else if (!flujoValido) {
         digitalWrite(pinBomba, LOW);
