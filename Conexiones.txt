@@ -1,0 +1,20 @@
+Sensor Ultrasonico
+
+ECHO ---- R1 ----+----> GPIO 18 (ESP32)
+                 |
+                R2
+                 |
+                GND
+
+
+
+Flujometro
+
+Rojo  (VIN / 5V ESP32) ───── VCC (sensor)
+Negro (GND ESP32)      ───── GND (sensor)
+
+GPIO 4 ──────────────── Señal (amarillo)
+           │
+         [10kΩ]
+           │
+         3.3V
