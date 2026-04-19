@@ -35,13 +35,7 @@ Preferences prefs;
 unsigned long tiempoCebado = 3000;
 unsigned long tiempoReintento = 5000;
 
-// Histéresis nivel
-// Se conservan para compatibilidad de UI/config,
-// pero la lógica AUTO usa esp32/nivel_bajo
-int nivelArranque = 85;
-int nivelParo = 95;
-
-// Histéresis flujo
+// Histéresis de flujo
 float flujoOn = 5.5;
 float flujoOff = 4.0;
 
@@ -58,8 +52,6 @@ float flujo = 0.0;
 unsigned long ultimoCalculoFlujo = 0;
 unsigned long ultimaPublicacionFlujo = 0;
 unsigned long tiempoEstado = 0;
-
-int valor = 100;
 
 bool estadoBomba = false;
 bool estadoBombaPrevio = false;
@@ -96,6 +88,7 @@ void publicarFlujo();
 void publicarFlujoCero();
 void actualizarEstadoFlujoValido();
 void publicarCmdPrecheckNivel();
+void apagarBombaYResetearEstado();
 
 // =========================
 // INTERRUPCIÓN
@@ -113,9 +106,6 @@ void cargarConfiguracion() {
   tiempoCebado = prefs.getULong("cebado", 3000);
   tiempoReintento = prefs.getULong("reint", 5000);
 
-  nivelArranque = prefs.getInt("nivarr", 85);
-  nivelParo = prefs.getInt("nivparo", 95);
-
   flujoOn = prefs.getFloat("flon", 5.5);
   flujoOff = prefs.getFloat("floff", 4.0);
 
@@ -123,11 +113,6 @@ void cargarConfiguracion() {
   intervaloFlujoActivo = prefs.getULong("ifact", 2000);
 
   prefs.end();
-
-  if (nivelArranque >= nivelParo) {
-    nivelArranque = 85;
-    nivelParo = 95;
-  }
 
   if (flujoOff >= flujoOn) {
     flujoOn = 5.5;
@@ -139,10 +124,6 @@ void cargarConfiguracion() {
   Serial.println(tiempoCebado);
   Serial.print("tiempoReintento = ");
   Serial.println(tiempoReintento);
-  Serial.print("nivelArranque = ");
-  Serial.println(nivelArranque);
-  Serial.print("nivelParo = ");
-  Serial.println(nivelParo);
   Serial.print("flujoOn = ");
   Serial.println(flujoOn);
   Serial.print("flujoOff = ");
@@ -158,9 +139,6 @@ void guardarConfiguracion() {
 
   prefs.putULong("cebado", tiempoCebado);
   prefs.putULong("reint", tiempoReintento);
-
-  prefs.putInt("nivarr", nivelArranque);
-  prefs.putInt("nivparo", nivelParo);
 
   prefs.putFloat("flon", flujoOn);
   prefs.putFloat("floff", flujoOff);
@@ -227,12 +205,6 @@ void publicarConfiguracion() {
   ultoa(tiempoReintento, buffer, 10);
   client.publish("esp32/config/estado/tiempo_reintento", buffer, true);
 
-  itoa(nivelArranque, buffer, 10);
-  client.publish("esp32/config/estado/nivel_arranque", buffer, true);
-
-  itoa(nivelParo, buffer, 10);
-  client.publish("esp32/config/estado/nivel_paro", buffer, true);
-
   dtostrf(flujoOn, 4, 2, buffer);
   client.publish("esp32/config/estado/flujo_on", buffer, true);
 
@@ -254,6 +226,17 @@ void publicarCmdPrecheckNivel() {
   } else {
     Serial.println("Error al publicar esp32/cmd/precheck_nivel");
   }
+}
+
+// =========================
+// UTILIDAD
+// =========================
+void apagarBombaYResetearEstado() {
+  digitalWrite(pinBomba, LOW);
+  estadoBomba = false;
+  estado = APAGADO;
+  tiempoEstado = millis();
+  flujoValido = false;
 }
 
 // =========================
@@ -297,28 +280,6 @@ void aplicarConfigPorTopico(const String& topicStr, const String& mensaje) {
       Serial.println(tiempoReintento);
     } else {
       Serial.println("Valor inválido para tiempo_reintento");
-    }
-  }
-  else if (topicStr == "esp32/config/nivel_arranque") {
-    int nuevoValor = mensaje.toInt();
-    if (nuevoValor >= 1 && nuevoValor <= 99 && nuevoValor < nivelParo) {
-      nivelArranque = nuevoValor;
-      cambio = true;
-      Serial.print("Nuevo nivelArranque: ");
-      Serial.println(nivelArranque);
-    } else {
-      Serial.println("Valor inválido para nivel_arranque");
-    }
-  }
-  else if (topicStr == "esp32/config/nivel_paro") {
-    int nuevoValor = mensaje.toInt();
-    if (nuevoValor >= 2 && nuevoValor <= 100 && nuevoValor > nivelArranque) {
-      nivelParo = nuevoValor;
-      cambio = true;
-      Serial.print("Nuevo nivelParo: ");
-      Serial.println(nivelParo);
-    } else {
-      Serial.println("Valor inválido para nivel_paro");
     }
   }
   else if (topicStr == "esp32/config/flujo_on") {
@@ -393,12 +354,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Serial.print("]: ");
   Serial.println(mensaje);
 
-  if (topicStr == "esp32/datos") {
-    valor = mensaje.toInt();
-    Serial.print("Nivel actualizado (%): ");
-    Serial.println(valor);
-  }
-  else if (topicStr == "esp32/nivel_bajo") {
+  if (topicStr == "esp32/nivel_bajo") {
     if (mensajeUpper == "SI") {
       nivelBajo = true;
       nivelBajoRecibido = true;
@@ -415,11 +371,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
     if (mensajeUpper == "MANUAL") {
       modoManual = true;
 
-      digitalWrite(pinBomba, LOW);
-      estadoBomba = false;
-      estado = APAGADO;
-      tiempoEstado = millis();
-      flujoValido = false;
+      apagarBombaYResetearEstado();
       flujoCeroPublicado = false;
 
       publicarEstadoBomba();
@@ -431,11 +383,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
     else if (mensajeUpper == "AUTO") {
       modoManual = false;
 
-      digitalWrite(pinBomba, LOW);
-      estadoBomba = false;
-      estado = APAGADO;
-      tiempoEstado = millis();
-      flujoValido = false;
+      apagarBombaYResetearEstado();
       flujoCeroPublicado = false;
 
       publicarEstadoBomba();
@@ -465,11 +413,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
       Serial.println("Bomba ENCENDIDA manualmente");
     }
     else if (mensajeUpper == "OFF") {
-      digitalWrite(pinBomba, LOW);
-      estadoBomba = false;
-      estado = APAGADO;
-      tiempoEstado = millis();
-      flujoValido = false;
+      apagarBombaYResetearEstado();
 
       publicarEstadoBomba();
       publicarFlujoCero();
@@ -481,8 +425,6 @@ void callback(char* topic, byte* payload, unsigned int length) {
   else if (
     topicStr == "esp32/config/tiempo_cebado" ||
     topicStr == "esp32/config/tiempo_reintento" ||
-    topicStr == "esp32/config/nivel_arranque" ||
-    topicStr == "esp32/config/nivel_paro" ||
     topicStr == "esp32/config/flujo_on" ||
     topicStr == "esp32/config/flujo_off" ||
     topicStr == "esp32/config/intervalo_flujo_cebado" ||
@@ -519,28 +461,22 @@ void reconnect() {
     if (client.connect("ESP32_Controlador", mqtt_user, mqtt_pass)) {
       Serial.println(" conectado");
 
-      client.subscribe("esp32/datos");
       client.subscribe("esp32/nivel_bajo");
       client.subscribe("esp32/cmd/modo");
       client.subscribe("esp32/cmd/bomba");
 
       client.subscribe("esp32/config/tiempo_cebado");
       client.subscribe("esp32/config/tiempo_reintento");
-      client.subscribe("esp32/config/nivel_arranque");
-      client.subscribe("esp32/config/nivel_paro");
       client.subscribe("esp32/config/flujo_on");
       client.subscribe("esp32/config/flujo_off");
       client.subscribe("esp32/config/intervalo_flujo_cebado");
       client.subscribe("esp32/config/intervalo_flujo_activo");
 
-      Serial.println("Suscrito a esp32/datos");
       Serial.println("Suscrito a esp32/nivel_bajo");
       Serial.println("Suscrito a esp32/cmd/modo");
       Serial.println("Suscrito a esp32/cmd/bomba");
       Serial.println("Suscrito a esp32/config/tiempo_cebado");
       Serial.println("Suscrito a esp32/config/tiempo_reintento");
-      Serial.println("Suscrito a esp32/config/nivel_arranque");
-      Serial.println("Suscrito a esp32/config/nivel_paro");
       Serial.println("Suscrito a esp32/config/flujo_on");
       Serial.println("Suscrito a esp32/config/flujo_off");
       Serial.println("Suscrito a esp32/config/intervalo_flujo_cebado");
@@ -696,11 +632,7 @@ void loop() {
           estado = ENCENDIDO_OK;
           Serial.println("Flujo confirmado, bomba estable");
         } else {
-          digitalWrite(pinBomba, LOW);
-          estadoBomba = false;
-          estado = APAGADO;
-          tiempoEstado = now;
-          flujoValido = false;
+          apagarBombaYResetearEstado();
           Serial.println("Sin flujo válido, apagando");
         }
       }
@@ -708,18 +640,11 @@ void loop() {
 
     case ENCENDIDO_OK:
       if (nivelBajoRecibido && !nivelBajo) {
-        digitalWrite(pinBomba, LOW);
-        estadoBomba = false;
-        estado = APAGADO;
-        tiempoEstado = now;
-        flujoValido = false;
+        apagarBombaYResetearEstado();
         Serial.println("Nivel ya no está bajo, apagando");
       }
       else if (!flujoValido) {
-        digitalWrite(pinBomba, LOW);
-        estadoBomba = false;
-        estado = APAGADO;
-        tiempoEstado = now;
+        apagarBombaYResetearEstado();
         Serial.println("Flujo perdido, apagando bomba");
       }
       break;
